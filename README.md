@@ -218,7 +218,13 @@ For the curious:
    redrawing via cursor-home + erase-to-EOL rather than a full clear, so
    unchanged pixels don't flicker.
 
-When Claude exits, the SessionEnd hook kills the tagged pane.
+When Claude exits, the SessionEnd hook kills the tagged pane. To close a
+respawn race (a statusline tick firing between the kill and Claude actually
+exiting would otherwise spawn a fresh sidebar with nothing left to clean it
+up), the hook also stamps `@claude_sidebar_disabled_at` on the window with
+the current epoch. `statusline.sh` checks that marker before respawning and
+skips for ~10s, after which the marker is treated as stale and cleared so a
+new Claude session in the same tmux window isn't permanently locked out.
 
 ## Files
 

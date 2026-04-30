@@ -259,6 +259,21 @@ if [ -n "${TMUX:-}" ]; then
   tmux set-option -w -t "$WIN_ID" @claude_sidebar_file "$SIDEBAR_FILE" 2>/dev/null
 
   if [ -z "$SIDEBAR_PANE" ]; then
+    # Respawn guard: the SessionEnd hook stamps an epoch into
+    # @claude_sidebar_disabled_at right before killing the pane. If a
+    # statusline tick fires inside that teardown window we'd otherwise spawn
+    # a fresh sidebar with nothing left to clean it up. Honour the marker for
+    # ~10s, then treat it as stale (so a new claude session in the same tmux
+    # window isn't permanently locked out).
+    DISABLED_AT=$(tmux show-options -wqv -t "$WIN_ID" @claude_sidebar_disabled_at 2>/dev/null)
+    if [ -n "$DISABLED_AT" ]; then
+      NOW=$(date +%s)
+      if [ $((NOW - DISABLED_AT)) -lt 10 ]; then
+        exit 0
+      fi
+      tmux set-option -wu -t "$WIN_ID" @claude_sidebar_disabled_at 2>/dev/null
+    fi
+
     SIDEBAR_PANE=$(tmux split-window -h -d -l "$TARGET_W" -t "${TMUX_PANE:-$WIN_ID}" \
                     -P -F '#{pane_id}' "$LOOP_SCRIPT" 2>/dev/null)
     [ -n "$SIDEBAR_PANE" ] && tmux set -pt "$SIDEBAR_PANE" @claude_sidebar 1 2>/dev/null
