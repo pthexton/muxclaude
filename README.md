@@ -207,6 +207,26 @@ source-file ~/.claude/tmux/muxclaude.tmux.conf
 | PostToolUse | `pr-created-refresh-ci.sh`    | always                    |
 | Stop        | `stop-continue-tasks.sh`      | only with `--with-stop-hook` |
 
+## Advanced: deterministic vetoes via PreToolUse hooks
+
+Anything you can detect by inspecting the tool call payload, you can
+*deterministically block* with a `PreToolUse` hook that returns
+`permissionDecision: "ask"`. Unlike instructions in CLAUDE.md or a system
+prompt, this is enforced by the harness — Claude can't choose to ignore it.
+
+A worked example lives at `examples/hooks/pr-create-multi-ticket-check.js`:
+it watches for `gh pr create` invocations whose title or body mention more
+than one Jira-style ticket key (because GitHub→Jira automations often
+auto-close every key they see in a merged PR body — silently retiring
+tickets you only meant to *reference*). Edit the project prefix at the top
+of the file and wire it into `settings.json` under `hooks.PreToolUse` with
+`matcher: "Bash"`.
+
+The script is JavaScript rather than shell because Claude Code already
+ships with Node.js, so there's no extra runtime to install. The example
+isn't auto-installed — copy it into `~/.claude/hooks/`, customise, and
+register it yourself.
+
 ## Files
 
 ```
