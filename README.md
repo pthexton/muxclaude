@@ -103,13 +103,31 @@ A timestamped backup is made of every file the installer modifies.
 stdin. The full field reference lives in the `JSON INPUT FIELDS` comment
 block at the top of the script.
 
-To capture a live sample for inspection:
+To capture a live sample for inspection, add this to your `~/.zshrc` (or
+`~/.bashrc`) and start a new terminal — see [Setting environment
+variables](#setting-environment-variables) below for why this matters:
 
 ```sh
 export MUXCLAUDE_DEBUG_INPUT=$HOME/.claude/last-statusline-input.json
 ```
 
-The next refresh dumps the full JSON to that path.
+The next status refresh dumps the full JSON to that path.
+
+### Setting environment variables
+
+Every option muxclaude exposes as an environment variable
+(`MUXCLAUDE_TASKS_CMD`, `MUXCLAUDE_DEBUG_INPUT`) has to be present in the
+shell that launches `claude`. Some things to know:
+
+- Set them in your shell rc (`~/.zshrc`, `~/.bashrc`, …) so every new
+  terminal inherits them, then start a fresh terminal for the change to
+  take effect.
+- Running `export FOO=bar` in a *different* tab or window has **no
+  effect** on a `claude` session that is already running. Each running
+  `claude` keeps the environment of the shell that launched it.
+- The easiest way to get `MUXCLAUDE_TASKS_CMD` set up correctly is to let
+  the installer write the export for you:
+  `./install.sh --tasks-cmd /path/to/your/tasks-script`.
 
 ## Plugging in your task tracker
 
@@ -132,11 +150,19 @@ It contains commented-out adapters for:
 - GitHub issues assigned to you (`gh issue list ...`)
 - Any custom CLI that produces structured output
 
-Uncomment the one that fits, or roll your own. As long as the output format
-is right, the sidebar will pick it up on the next status refresh.
+Uncomment the one that fits, or roll your own.
 
-If you don't want a tasks section at all, leave `MUXCLAUDE_TASKS_CMD` unset
-— the section will simply be hidden.
+`MUXCLAUDE_TASKS_CMD` has to be exported in the shell that launches
+`claude` — see [Setting environment variables](#setting-environment-variables).
+The simplest way is to let the installer write the export to your `~/.zshrc`
+for you:
+
+```sh
+./install.sh --tasks-cmd ~/.claude/muxclaude-tasks.sh
+```
+
+If you don't want a tasks section at all, leave `MUXCLAUDE_TASKS_CMD`
+unset — the section will simply be hidden.
 
 ### Optional: a Stop hook that keeps Claude moving
 
