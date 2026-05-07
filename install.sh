@@ -57,6 +57,7 @@ do_cmd() {
 # --- Preflight ---------------------------------------------------------------
 command -v jq   >/dev/null || { warn "jq not found — install it (brew install jq) and re-run."; exit 1; }
 command -v tmux >/dev/null || warn "tmux not found — sidebar features won't work until you install it."
+command -v gh   >/dev/null || warn "gh not found — the CI section + F5/F6 popups will stay hidden until you install it (brew install gh)."
 
 say "Source:  $SRC_DIR"
 say "Prefix:  $PREFIX"
@@ -77,7 +78,15 @@ copy_with_backup() {
 say "Installing scripts…"
 copy_with_backup "$SRC_DIR/statusline.sh"                  "$PREFIX/statusline.sh"
 copy_with_backup "$SRC_DIR/sidebar-loop.sh"                "$PREFIX/sidebar-loop.sh"
+copy_with_backup "$SRC_DIR/ci-fetch.sh"                    "$PREFIX/ci-fetch.sh"
+copy_with_backup "$SRC_DIR/refresh-ci.sh"                  "$PREFIX/refresh-ci.sh"
+copy_with_backup "$SRC_DIR/open-pr.sh"                     "$PREFIX/open-pr.sh"
 copy_with_backup "$SRC_DIR/hooks/tmux-cleanup-sidebar.sh"  "$PREFIX/hooks/tmux-cleanup-sidebar.sh"
+copy_with_backup "$SRC_DIR/hooks/pr-created-refresh-ci.sh" "$PREFIX/hooks/pr-created-refresh-ci.sh"
+
+# tmux key bindings example — users source-file this from their own tmux.conf.
+mkdir -p "$PREFIX/tmux"
+do_cmd "install -m 0644 '$SRC_DIR/tmux/muxclaude.tmux.conf' '$PREFIX/tmux/muxclaude.tmux.conf'"
 
 # Always stage the Stop-hook template so users who later wire up tasks can
 # enable it just by re-running with --with-stop-hook (or by editing settings).
@@ -109,11 +118,13 @@ fi
 SL_CMD="$PREFIX/statusline.sh"
 CLEANUP_CMD="$PREFIX/hooks/tmux-cleanup-sidebar.sh"
 STOP_CMD="$PREFIX/hooks/stop-continue-tasks.sh"
+PRCI_CMD="$PREFIX/hooks/pr-created-refresh-ci.sh"
 
 NEW_JSON=$(jq \
   --arg sl       "$SL_CMD" \
   --arg cleanup  "$CLEANUP_CMD" \
   --arg stop     "$STOP_CMD" \
+  --arg prci     "$PRCI_CMD" \
   --argjson installStop "$INSTALL_STOP_HOOK" '
     # statusLine
     .statusLine = { type: "command", command: $sl }
@@ -129,6 +140,18 @@ NEW_JSON=$(jq \
           )
         ))
         + [{ hooks: [{ type: "command", command: $cleanup, timeout: 5 }] }]
+      )
+
+    # PostToolUse: drop any muxclaude entry, then append fresh. The hook
+    # script self-filters on tool_name=="Bash" + the "gh pr create" substring,
+    # so a global registration here is a no-op for every other tool call.
+    | .hooks.PostToolUse = (
+        ((.hooks.PostToolUse // []) | map(
+          select(
+            (.hooks // []) | map(.command // "") | any(. == $prci) | not
+          )
+        ))
+        + [{ hooks: [{ type: "command", command: $prci, timeout: 5 }] }]
       )
 
     # Stop: always drop a previous muxclaude entry; re-add only if requested
@@ -230,11 +253,15 @@ Next steps:
   2. (Optional) plug in a task source: edit $PREFIX/muxclaude-tasks.sh
                                        and \`export MUXCLAUDE_TASKS_CMD=$PREFIX/muxclaude-tasks.sh\`
                                        (or re-run install.sh with --tasks-cmd).
-  3. (Optional) if you wired up a task source, you can also enable a Stop
+  3. (Optional) wire up F5/F6 popups in tmux. Add this to your ~/.tmux.conf:
+       source-file $PREFIX/tmux/muxclaude.tmux.conf
+     Then \`tmux source-file ~/.tmux.conf\`. F5 force-refreshes CI, F6 opens
+     the PR for the active branch — both shown via tmux popups.
+  4. (Optional) if you wired up a task source, you can also enable a Stop
      hook that nudges Claude to keep going while pending tasks remain:
        re-run install.sh --with-stop-hook
      (Edit $PREFIX/hooks/stop-continue-tasks.sh first to mention your tracker.)
-  4. Run:                               claude
+  5. Run:                               claude
 
   Inside tmux you'll get a sidebar pane on the right; outside you'll get a
   two-line status. See $SRC_DIR/README.md for the full input-field reference.

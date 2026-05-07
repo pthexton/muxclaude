@@ -176,6 +176,130 @@ format_tasks() {
   done <<< "$ALL_TASKS"
 }
 
+# --- CI checks (cached; fetched in background by ci-fetch.sh) ---------------
+# Refresh policy:
+#   * Cache missing             → fetch immediately
+#   * Local commit moved        → fetch (CI is now reporting on a different sha)
+#   * Same commit + any pending → fetch every 60s
+#   * No PR for branch          → poll every 300s (a PR may be opened externally)
+#   * PR fresh (<10 min) + zero checks → poll every 30s (workflows still registering)
+#   * Same commit + all terminal → don't auto-fetch (F5 in the sidebar to force)
+# A PostToolUse hook (hooks/pr-created-refresh-ci.sh) also kicks off an
+# immediate fetch when Claude itself runs `gh pr create` successfully, so we
+# don't have to wait on either the 300s or 30s windows post-creation.
+CI_CACHE=""
+CI_COMMIT_SHA=""
+if [ -n "$BRANCH_NAME" ] && command -v gh >/dev/null 2>&1; then
+  CI_REPO_ID=""
+  CI_REPO_ID=$(git -C "$DIR" config --get remote.origin.url 2>/dev/null \
+                 | sed -E 's#.*[:/]([^/:]+/[^/]+)(\.git)?$#\1#; s#\.git$##')
+  CI_COMMIT_SHA=$(git -C "$DIR" rev-parse HEAD 2>/dev/null)
+  if [ -n "$CI_REPO_ID" ]; then
+    CI_KEY="${CI_REPO_ID//\//_}__${BRANCH_NAME//\//_}"
+    CI_CACHE="$HOME/.claude/cache/ci/${CI_KEY}.json"
+    NOW=$(date +%s)
+
+    spawn_fetch=0
+    if [ ! -r "$CI_CACHE" ]; then
+      spawn_fetch=1
+    else
+      cached_sha=$(jq -r '.commit_sha // ""' "$CI_CACHE" 2>/dev/null)
+      has_pr=$(jq -r '(.pr.number // empty) | tostring' "$CI_CACHE" 2>/dev/null)
+      has_pending=$(jq -r 'try ([.checks[].bucket] | any(. == "pending")) catch false' "$CI_CACHE" 2>/dev/null)
+      checks_count=$(jq -r '(.checks // []) | length' "$CI_CACHE" 2>/dev/null)
+      pr_created_at=$(jq -r '.pr.createdAt // ""' "$CI_CACHE" 2>/dev/null)
+      cache_age=$(( NOW - $(stat -f '%m' "$CI_CACHE" 2>/dev/null || echo "$NOW") ))
+
+      # Time since the PR was opened, in seconds. macOS-only date parser.
+      # Used to detect the "just-opened PR but workflows haven't registered"
+      # window where checks_count==0 isn't actually terminal.
+      pr_age=999999
+      if [ -n "$pr_created_at" ]; then
+        pr_age=$(( NOW - $(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$pr_created_at" "+%s" 2>/dev/null || echo "$NOW") ))
+      fi
+
+      if [ -n "$CI_COMMIT_SHA" ] && [ "$cached_sha" != "$CI_COMMIT_SHA" ]; then
+        spawn_fetch=1
+      elif [ "$has_pending" = "true" ]; then
+        [ "$cache_age" -ge 60 ] && spawn_fetch=1
+      elif [ -z "$has_pr" ]; then
+        # No PR known — keep occasional polling in case one gets opened.
+        [ "$cache_age" -ge 300 ] && spawn_fetch=1
+      elif [ -n "$has_pr" ] && [ "$checks_count" = "0" ] && [ "$pr_age" -lt 600 ]; then
+        # Fresh PR (< 10 min old) but no workflows registered yet. GitHub is
+        # still queuing the run; what looks like "all terminal" is actually
+        # "checks haven't appeared on the PR yet". Poll at 30s so the sidebar
+        # lights up within seconds of the first job appearing.
+        [ "$cache_age" -ge 30 ] && spawn_fetch=1
+      fi
+      # else: same commit, all terminal — never auto-fetch (F5 to force).
+    fi
+
+    if [ "$spawn_fetch" -eq 1 ] && [ -x "$HOME/.claude/ci-fetch.sh" ]; then
+      ( "$HOME/.claude/ci-fetch.sh" "$DIR" "$CI_CACHE" >/dev/null 2>&1 & ) >/dev/null 2>&1
+    fi
+  fi
+fi
+
+format_ci() {
+  [ -z "$CI_CACHE" ] || [ ! -r "$CI_CACHE" ] && return
+  local pr_num pr_title pass fail pending skip cancel summary width=${1:-40}
+  pr_num=$(jq -r '.pr.number // ""' "$CI_CACHE" 2>/dev/null)
+  [ -z "$pr_num" ] && return
+  pr_title=$(jq -r '.pr.title // ""' "$CI_CACHE" 2>/dev/null)
+
+  pass=$(jq    '[.checks[]|select(.bucket=="pass")]    |length' "$CI_CACHE")
+  fail=$(jq    '[.checks[]|select(.bucket=="fail")]    |length' "$CI_CACHE")
+  pending=$(jq '[.checks[]|select(.bucket=="pending")] |length' "$CI_CACHE")
+  skip=$(jq    '[.checks[]|select(.bucket=="skipping")]|length' "$CI_CACHE")
+  cancel=$(jq  '[.checks[]|select(.bucket=="cancel")]  |length' "$CI_CACHE")
+
+  # Truncate title so it fits the sidebar.
+  if [ "${#pr_title}" -gt "$width" ]; then
+    pr_title="${pr_title:0:$((width-1))}…"
+  fi
+
+  echo -e "${DIM}#${pr_num}${RESET} ${pr_title}"
+
+  summary=""
+  [ "$pass"    -gt 0 ] && summary+="${GREEN}✓ ${pass}${RESET}  "
+  [ "$fail"    -gt 0 ] && summary+="${RED}✗ ${fail}${RESET}  "
+  [ "$pending" -gt 0 ] && summary+="${YELLOW}◔ ${pending}${RESET}  "
+  [ "$cancel"  -gt 0 ] && summary+="${YELLOW}⊘ ${cancel}${RESET}  "
+  [ "$skip"    -gt 0 ] && summary+="${DIM}⊝ ${skip}${RESET}"
+  [ -n "$summary" ] && echo -e "$summary"
+
+  # Surface the things you actually care about: failures and in-flight jobs.
+  jq -r '.checks[]
+           | select(.bucket=="fail" or .bucket=="pending")
+           | "\(.bucket)\t\(.name)\t\(.workflow // "")"' "$CI_CACHE" 2>/dev/null \
+    | head -6 \
+    | while IFS=$'\t' read -r bucket name workflow; do
+        case "$bucket" in
+          fail)    icon="${RED}✗${RESET}" ;;
+          pending) icon="${YELLOW}◔${RESET}" ;;
+          *)       icon=" " ;;
+        esac
+        # Compose label, then truncate.
+        if [ -n "$workflow" ] && [ "$workflow" != "$name" ]; then
+          label="${name} (${workflow})"
+        else
+          label="${name}"
+        fi
+        if [ "${#label}" -gt $((width-2)) ]; then
+          label="${label:0:$((width-3))}…"
+        fi
+        # Re-apply colour to the workflow part if we kept it.
+        if [ -n "$workflow" ] && [ "$workflow" != "$name" ]; then
+          short_label="${label%% (*}"
+          wf_part="${label#"$short_label"}"
+          echo -e "  ${icon} ${short_label}${DIM}${wf_part}${RESET}"
+        else
+          echo -e "  ${icon} ${label}"
+        fi
+      done
+}
+
 # =============================================================================
 # TMUX mode: bottom line is minimal; rich info goes to a right-side sidebar pane
 # =============================================================================
@@ -236,10 +360,32 @@ if [ -n "${TMUX:-}" ]; then
         [ -n "$d" ] && echo -e "  $(short_path "$d" "$((TARGET_W - 2))")"
       done <<< "$ADDED_DIRS"
     fi
+    # Contextual key hints — accumulate as we render sections that have a
+    # keystroke associated with them, then list at the bottom of the sidebar.
+    KEYS_LINES=""
+
+    CI_OUT=$(format_ci "$((TARGET_W - 2))")
+    if [ -n "$CI_OUT" ]; then
+      echo
+      echo -e "${BOLD}${GREEN}── CI ──${RESET}"
+      echo "$CI_OUT"
+      KEYS_LINES+="<F5> Refresh CI"$'\n'
+      KEYS_LINES+="<F6> Open PR"$'\n'
+    fi
     if [ -n "$ALL_TASKS" ]; then
       echo
       echo -e "${BOLD}${CYAN}── Tasks ──${RESET}"
       format_tasks
+    fi
+    if [ -n "$KEYS_LINES" ]; then
+      echo
+      echo -e "${BOLD}${DIM}── Keys ──${RESET}"
+      # `column -c TARGET_W` packs entries side-by-side when the sidebar is
+      # wide enough, falls back to stacking them when it isn't. ANSI colour
+      # is applied to the whole block so column doesn't mis-count widths.
+      echo -ne "${DIM}"
+      printf '%s' "$KEYS_LINES" | column -c "$TARGET_W"
+      echo -ne "${RESET}"
     fi
   } > "${SIDEBAR_FILE}.tmp" && mv "${SIDEBAR_FILE}.tmp" "$SIDEBAR_FILE"
 
@@ -257,6 +403,15 @@ if [ -n "${TMUX:-}" ]; then
   # option. The loop script reads this each tick so whichever Claude session
   # most recently ran statusline owns the sidebar.
   tmux set-option -w -t "$WIN_ID" @claude_sidebar_file "$SIDEBAR_FILE" 2>/dev/null
+
+  # Publish CI context for the F5/F6 popup helpers and the conditional
+  # tmux key bindings (see tmux/muxclaude.tmux.conf). Setting these makes
+  # the bindings active in this window; clearing them passes the keys
+  # through to whatever app is running.
+  if [ -n "$CI_CACHE" ]; then
+    tmux set-option -w -t "$WIN_ID" @claude_ci_dir   "$DIR"      2>/dev/null
+    tmux set-option -w -t "$WIN_ID" @claude_ci_cache "$CI_CACHE" 2>/dev/null
+  fi
 
   if [ -z "$SIDEBAR_PANE" ]; then
     # Respawn guard: the SessionEnd hook stamps an epoch into

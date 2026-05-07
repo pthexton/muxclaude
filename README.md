@@ -37,11 +37,19 @@ two-line status with the same data.
   limit), session cost/time, workspace paths, branch, worktree indicator.
 - **Pluggable task source** — point `MUXCLAUDE_TASKS_CMD` at any script that
   emits `status\ttitle` lines and your kanban/todo shows up in the sidebar.
+- **CI section + F5/F6 tmux popups** — when the current branch has a PR,
+  the sidebar shows pass/fail/pending counts, F5 force-refreshes the cache
+  with visible progress feedback, F6 opens the PR in your browser. Both
+  surface success and failure paths in tmux popups so the result is
+  unmissable. Hidden when there's nothing to show.
 - **`claude` shell function** that auto-starts a tmux session if you're not
   already in one — sidebar appears from the very first render.
 - **Per-session sidebar files** keyed off the transcript path, so multiple
   Claude windows don't clobber each other's sidebars.
 - **SessionEnd hook** that cleans up the sidebar pane when Claude exits.
+- **PostToolUse hook** that triggers an instant CI refresh whenever Claude
+  itself runs `gh pr create`, so the sidebar lights up within seconds of a
+  fresh PR rather than waiting on the polling cadence.
 - **Optional Stop hook** that nudges Claude to check your task tracker before
   ending its turn.
 - **Idempotent installer** that backs up anything it replaces.
@@ -51,6 +59,9 @@ two-line status with the same data.
 - macOS or Linux
 - `bash`, `jq`, `tmux`, `git`, `awk` (BSD or GNU)
 - zsh for the `claude()` wrapper (the rest is bash)
+- `gh` (GitHub CLI) — *optional*; required only for the CI section and the
+  F5/F6 popups. Without it, those features stay hidden and everything else
+  works.
 
 ## Install
 
@@ -188,6 +199,38 @@ one nudge per turn.
 Without a task source this hook adds latency for no benefit, which is why
 it's **off by default**.
 
+## CI section + F5 / F6 popups
+
+When the current branch has a PR open on GitHub, the sidebar gains a CI
+section showing the PR number/title and a coloured count of pass/fail/pending
+checks, plus the names of any failing or in-flight jobs. The data is cached
+under `~/.claude/cache/ci/` and refreshed in the background by
+`statusline.sh` on a sliding cadence (60s while pending, 300s while no PR
+exists, never while a terminal state is settled at the current commit).
+
+Two tmux key bindings give you an escape hatch from the cache logic and
+visible feedback for both:
+
+| Key | Action                                  | Popup shows                               |
+|-----|-----------------------------------------|-------------------------------------------|
+| F5  | Force a fresh CI fetch                  | `⟳ Refreshing → ✓ Done. PR #N — pass/fail/pending` (or ✗ on failure) |
+| F6  | Open the current branch's PR in browser | `→ Opening PR for branch X` (or ✗ no PR / git error / gh error) |
+
+Both bindings are gated to Claude windows: outside a Claude window, F5 and
+F6 fall through to whatever app is running. To enable them, source the
+provided snippet from your tmux config:
+
+```sh
+# in ~/.tmux.conf
+source-file ~/.claude/tmux/muxclaude.tmux.conf
+```
+
+Then `tmux source-file ~/.tmux.conf` to reload.
+
+The popups are tiny (`tmux display-popup -h 7 -w 78`) and auto-close after a
+few seconds — they're there to answer "did anything happen?" without
+hijacking your screen.
+
 ## Hooks
 
 `install.sh` always wires up:
@@ -195,6 +238,11 @@ it's **off by default**.
 - **SessionEnd → `tmux-cleanup-sidebar.sh`**: kills any pane in Claude's
   tmux window tagged with `@claude_sidebar=1`. Other windows' sidebars
   survive.
+- **PostToolUse → `pr-created-refresh-ci.sh`**: when Claude runs a
+  successful `gh pr create`, kicks off an immediate CI fetch so the sidebar
+  doesn't sit on a stale "no PR" cache. The hook script self-filters on
+  `tool_name == "Bash"` and the `gh pr create` substring, so it's a no-op
+  for every other tool call.
 
 Optional (off by default; enable with `--with-stop-hook`):
 
@@ -232,12 +280,19 @@ new Claude session in the same tmux window isn't permanently locked out.
 ~/.claude/
 ├── statusline.sh                 ← entry point Claude Code calls each tick
 ├── sidebar-loop.sh               ← runs in the sidebar pane
+├── ci-fetch.sh                   ← background PR + checks fetcher
+├── refresh-ci.sh                 ← F5 popup: force a CI refresh
+├── open-pr.sh                    ← F6 popup: open PR in browser
 ├── muxclaude-tasks.sh            ← (optional) your tasks adapter
 ├── settings.json                 ← hooks + statusLine config (patched)
+├── cache/ci/<repo>__<branch>.json ← per-branch CI cache
 ├── shell/
 │   └── claude-tmux.zsh           ← sourced from ~/.zshrc
+├── tmux/
+│   └── muxclaude.tmux.conf       ← F5/F6 bindings (source-file from tmux.conf)
 └── hooks/
     ├── tmux-cleanup-sidebar.sh   ← SessionEnd
+    ├── pr-created-refresh-ci.sh  ← PostToolUse (gh pr create)
     └── stop-continue-tasks.sh    ← Stop (optional)
 ```
 
@@ -247,12 +302,14 @@ There's no dedicated uninstaller, but it's easy:
 
 ```sh
 # Remove scripts
-rm -f ~/.claude/{statusline.sh,sidebar-loop.sh,muxclaude-tasks.sh}
-rm -rf ~/.claude/shell ~/.claude/hooks/tmux-cleanup-sidebar.sh ~/.claude/hooks/stop-continue-tasks.sh
+rm -f ~/.claude/{statusline.sh,sidebar-loop.sh,ci-fetch.sh,refresh-ci.sh,open-pr.sh,muxclaude-tasks.sh}
+rm -rf ~/.claude/shell ~/.claude/tmux ~/.claude/cache/ci
+rm -f ~/.claude/hooks/{tmux-cleanup-sidebar.sh,pr-created-refresh-ci.sh,stop-continue-tasks.sh}
 
 # Restore settings.json from the most recent backup
 ls -t ~/.claude/settings.json.bak.* | head -1 | xargs -I{} cp {} ~/.claude/settings.json
 
+# Remove the source-file line from ~/.tmux.conf if you added one.
 # Remove the # >>> muxclaude >>> ... # <<< muxclaude <<< block from ~/.zshrc.
 ```
 
