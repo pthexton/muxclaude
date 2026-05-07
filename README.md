@@ -50,8 +50,8 @@ two-line status with the same data.
 - **PostToolUse hook** that triggers an instant CI refresh whenever Claude
   itself runs `gh pr create`, so the sidebar lights up within seconds of a
   fresh PR rather than waiting on the polling cadence.
-- **Optional Stop hook** that nudges Claude to check your task tracker before
-  ending its turn.
+- **Optional Stop hook** that keeps Claude moving while your tracker has
+  outstanding work, and lets it stop cleanly otherwise.
 - **Idempotent installer** that backs up anything it replaces.
 
 ## Requirements
@@ -78,8 +78,9 @@ The installer:
 1. Copies `statusline.sh`, `sidebar-loop.sh`, hooks, and the example tasks
    provider into `~/.claude/`.
 2. Patches `~/.claude/settings.json` to point `statusLine` at the script and
-   register the `SessionEnd` (and optional `Stop`) hooks. Existing config is
-   preserved; previous muxclaude entries are deduplicated.
+   register the `SessionEnd` and `PostToolUse` hooks (plus the optional
+   `Stop` hook). Existing config is preserved; previous muxclaude entries
+   are deduplicated.
 3. Adds a small block to `~/.zshrc` that sources the tmux-aware `claude()`
    function. The block is wrapped in `# >>> muxclaude >>>` markers so re-runs
    replace it cleanly.
@@ -98,33 +99,17 @@ A timestamped backup is made of every file the installer modifies.
 
 ## Customising the statusline
 
-`statusline.sh` is invoked by Claude Code on every status refresh, with a
-JSON document on stdin. The full set of fields available to you is documented
-at the top of the script — search for `JSON INPUT FIELDS`. Highlights:
+`statusline.sh` runs on every Claude status refresh with a JSON payload on
+stdin. The full field reference lives in the `JSON INPUT FIELDS` comment
+block at the top of the script.
 
-| jq path                                 | What it is                              |
-| --------------------------------------- | --------------------------------------- |
-| `.model.display_name` / `.model.id`     | The active model                        |
-| `.workspace.current_dir`                | Active working directory                |
-| `.workspace.project_dir`                | Where Claude was started                |
-| `.workspace.added_dirs[]`               | Extra `/add-dir` roots                  |
-| `.cost.total_cost_usd`                  | Running session cost                    |
-| `.cost.total_duration_ms`               | Wall time                               |
-| `.cost.total_lines_added` / `_removed`  | Diff lines applied this session         |
-| `.context_window.used_percentage`       | Context fill (0–100)                    |
-| `.rate_limits.five_hour.used_percentage`| 5-hour usage cap                        |
-| `.rate_limits.seven_day.used_percentage`| 7-day usage cap                         |
-| `.rate_limits.*.resets_at`              | Unix epoch when the cap resets          |
-| `.transcript_path`                      | JSONL file for this session             |
-| `.session_id`                           | Stable id for this session              |
-
-To explore live data:
+To capture a live sample for inspection:
 
 ```sh
 export MUXCLAUDE_DEBUG_INPUT=$HOME/.claude/last-statusline-input.json
 ```
 
-The next status refresh will dump the full JSON object to that path.
+The next refresh dumps the full JSON to that path.
 
 ## Plugging in your task tracker
 
@@ -155,130 +140,46 @@ If you don't want a tasks section at all, leave `MUXCLAUDE_TASKS_CMD` unset
 
 ### Optional: a Stop hook that keeps Claude moving
 
-Once you've wired up a task source, you can also have Claude
-*automatically continue* whenever there is still outstanding work in your
-tracker. Claude Code supports this via a `Stop` hook that returns a `block`
-decision with a reason — the model reads the reason and decides whether to
-keep going.
+The hook reuses `MUXCLAUDE_TASKS_CMD`. When Claude tries to end its turn,
+it checks the tracker: if anything is `pending` or `in_progress`, it emits
+a `block` decision and Claude keeps going; otherwise the Stop succeeds
+cleanly with no extra round-trip.
 
-The hook reuses `MUXCLAUDE_TASKS_CMD`, so you only configure your task
-source once. On every Stop event:
-
-1. If `MUXCLAUDE_TASKS_CMD` isn't set, or returns no rows, the hook exits
-   and Claude stops normally — no nag, no extra round-trip.
-2. If it returns any rows in `pending` or `in_progress` status, the hook
-   emits a `block` decision and the model continues, with the count
-   surfaced in the reason.
-3. Rows in `blocked` status are deliberately ignored — they can't be
-   progressed, so blocking on them would create a Stop loop with no exit.
-4. On a recursive Stop in the same turn (`stop_hook_active=true`), the
-   hook no-ops so Claude can always actually finish.
-
-Earlier iterations of this hook blocked every Stop unconditionally with a
-"go check your tracker" nag. Doing the check inside the hook itself keeps
-the conversation history clean when there's nothing outstanding.
-
-To enable it:
+Enable with:
 
 ```sh
 ./install.sh --with-stop-hook
 ```
 
-…or add the entry to `settings.json` by hand:
-
-```jsonc
-"Stop": [
-  {
-    "hooks": [
-      {
-        "type": "command",
-        "command": "/Users/you/.claude/hooks/stop-continue-tasks.sh",
-        "timeout": 10,
-        "statusMessage": "Checking for remaining task work"
-      }
-    ]
-  }
-]
-```
-
-Without `MUXCLAUDE_TASKS_CMD` set the hook is a fast no-op, but it's still
-**off by default** — the only reason to install it is to drive the
-auto-continue behaviour.
+Off by default — the only reason to install it is the auto-continue
+behaviour.
 
 ## CI section + F5 / F6 popups
 
 When the current branch has a PR open on GitHub, the sidebar gains a CI
-section showing the PR number/title and a coloured count of pass/fail/pending
-checks, plus the names of any failing or in-flight jobs. The data is cached
-under `~/.claude/cache/ci/` and refreshed in the background by
-`statusline.sh` on a sliding cadence (60s while pending, 300s while no PR
-exists, never while a terminal state is settled at the current commit).
+section: PR number/title, a coloured pass/fail/pending count, and the names
+of any failing or in-flight jobs. Cached under `~/.claude/cache/ci/` and
+refreshed in the background.
 
-Two tmux key bindings give you an escape hatch from the cache logic and
-visible feedback for both:
+| Key | Action                                                         |
+|-----|----------------------------------------------------------------|
+| F5  | Force a fresh CI fetch — popup shows progress + result summary |
+| F6  | Open the current branch's PR — popup confirms, or surfaces every failure path (no PR, gh error, …) |
 
-| Key | Action                                  | Popup shows                               |
-|-----|-----------------------------------------|-------------------------------------------|
-| F5  | Force a fresh CI fetch                  | `⟳ Refreshing → ✓ Done. PR #N — pass/fail/pending` (or ✗ on failure) |
-| F6  | Open the current branch's PR in browser | `→ Opening PR for branch X` (or ✗ no PR / git error / gh error) |
-
-Both bindings are gated to Claude windows: outside a Claude window, F5 and
-F6 fall through to whatever app is running. To enable them, source the
-provided snippet from your tmux config:
+Both bindings are gated to Claude windows; outside one, the keys pass
+through to whatever app is running. Enable by adding to `~/.tmux.conf`:
 
 ```sh
-# in ~/.tmux.conf
 source-file ~/.claude/tmux/muxclaude.tmux.conf
 ```
 
-Then `tmux source-file ~/.tmux.conf` to reload.
+## Hooks installed
 
-The popups are tiny (`tmux display-popup -h 7 -w 78`) and auto-close after a
-few seconds — they're there to answer "did anything happen?" without
-hijacking your screen.
-
-## Hooks
-
-`install.sh` always wires up:
-
-- **SessionEnd → `tmux-cleanup-sidebar.sh`**: kills any pane in Claude's
-  tmux window tagged with `@claude_sidebar=1`. Other windows' sidebars
-  survive.
-- **PostToolUse → `pr-created-refresh-ci.sh`**: when Claude runs a
-  successful `gh pr create`, kicks off an immediate CI fetch so the sidebar
-  doesn't sit on a stale "no PR" cache. The hook script self-filters on
-  `tool_name == "Bash"` and the `gh pr create` substring, so it's a no-op
-  for every other tool call.
-
-Optional (off by default; enable with `--with-stop-hook`):
-
-- **Stop → `stop-continue-tasks.sh`**: nudges Claude to check your task
-  tracker before ending its turn. See the section above for setup.
-
-## How the sidebar plumbing works
-
-For the curious:
-
-1. Each tick, `statusline.sh` writes a fully-rendered sidebar text to
-   `<transcript>.sidebar.txt` (atomic via `mv`).
-2. It records that path on the current tmux **window option**
-   `@claude_sidebar_file`. Window-scoped, not session-scoped, so multiple
-   Claude windows in one tmux session each get their own sidebar.
-3. If no pane in the window is tagged `@claude_sidebar=1`, it splits one
-   off (right-hand, sized to ~1/4 of the window) and runs `sidebar-loop.sh`
-   in it. The new pane gets the tag.
-4. `sidebar-loop.sh` polls `@claude_sidebar_file` every second, and only
-   redraws when the file's mtime/size changes (or the pane was resized) —
-   redrawing via cursor-home + erase-to-EOL rather than a full clear, so
-   unchanged pixels don't flicker.
-
-When Claude exits, the SessionEnd hook kills the tagged pane. To close a
-respawn race (a statusline tick firing between the kill and Claude actually
-exiting would otherwise spawn a fresh sidebar with nothing left to clean it
-up), the hook also stamps `@claude_sidebar_disabled_at` on the window with
-the current epoch. `statusline.sh` checks that marker before respawning and
-skips for ~10s, after which the marker is treated as stale and cleared so a
-new Claude session in the same tmux window isn't permanently locked out.
+| Trigger     | Hook                          | Default                   |
+|-------------|-------------------------------|---------------------------|
+| SessionEnd  | `tmux-cleanup-sidebar.sh`     | always                    |
+| PostToolUse | `pr-created-refresh-ci.sh`    | always                    |
+| Stop        | `stop-continue-tasks.sh`      | only with `--with-stop-hook` |
 
 ## Files
 
