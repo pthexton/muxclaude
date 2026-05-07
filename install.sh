@@ -258,9 +258,10 @@ Next steps:
      Then \`tmux source-file ~/.tmux.conf\`. F5 force-refreshes CI, F6 opens
      the PR for the active branch — both shown via tmux popups.
   4. (Optional) if you wired up a task source, you can also enable a Stop
-     hook that nudges Claude to keep going while pending tasks remain:
+     hook that re-uses MUXCLAUDE_TASKS_CMD: it checks your tracker on every
+     Stop and only blocks (telling Claude to keep going) when there is
+     pending or in_progress work — otherwise Claude stops cleanly:
        re-run install.sh --with-stop-hook
-     (Edit $PREFIX/hooks/stop-continue-tasks.sh first to mention your tracker.)
   5. Run:                               claude
 
   Inside tmux you'll get a sidebar pane on the right; outside you'll get a

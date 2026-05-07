@@ -155,49 +155,55 @@ If you don't want a tasks section at all, leave `MUXCLAUDE_TASKS_CMD` unset
 
 ### Optional: a Stop hook that keeps Claude moving
 
-Once you've wired up a task source, it's natural to also have Claude
-*automatically continue* if there's still pending work in your tracker
-when it tries to end a turn. Claude Code supports this via a `Stop` hook
-that returns a `block` decision with a reason — Claude reads the reason
-and decides whether to keep going.
+Once you've wired up a task source, you can also have Claude
+*automatically continue* whenever there is still outstanding work in your
+tracker. Claude Code supports this via a `Stop` hook that returns a `block`
+decision with a reason — the model reads the reason and decides whether to
+keep going.
 
-A template ships at `~/.claude/hooks/stop-continue-tasks.sh`. To enable it:
+The hook reuses `MUXCLAUDE_TASKS_CMD`, so you only configure your task
+source once. On every Stop event:
 
-1. Edit the `REASON=…` line near the bottom to mention *your* tracker by
-   name. The more specific you are about what to look at, the better the
-   model's decision will be:
+1. If `MUXCLAUDE_TASKS_CMD` isn't set, or returns no rows, the hook exits
+   and Claude stops normally — no nag, no extra round-trip.
+2. If it returns any rows in `pending` or `in_progress` status, the hook
+   emits a `block` decision and the model continues, with the count
+   surfaced in the reason.
+3. Rows in `blocked` status are deliberately ignored — they can't be
+   progressed, so blocking on them would create a Stop loop with no exit.
+4. On a recursive Stop in the same turn (`stop_hook_active=true`), the
+   hook no-ops so Claude can always actually finish.
 
-   ```sh
-   # Examples
-   REASON="check Linear for any open tickets assigned to me on this branch and continue"
-   REASON="look at .tasks/TODO.md — if anything is pending or in_progress, keep going"
-   REASON="check the swift-todo-manager mcp for tasks to perform next and continue"
-   ```
+Earlier iterations of this hook blocked every Stop unconditionally with a
+"go check your tracker" nag. Doing the check inside the hook itself keeps
+the conversation history clean when there's nothing outstanding.
 
-2. Re-run the installer with `--with-stop-hook`, or add the entry to
-   `settings.json` by hand:
+To enable it:
 
-   ```jsonc
-   "Stop": [
-     {
-       "hooks": [
-         {
-           "type": "command",
-           "command": "/Users/you/.claude/hooks/stop-continue-tasks.sh",
-           "timeout": 10,
-           "statusMessage": "Checking for remaining task work"
-         }
-       ]
-     }
-   ]
-   ```
+```sh
+./install.sh --with-stop-hook
+```
 
-The hook short-circuits on the second stop in the same turn (it inspects
-`stop_hook_active`), so Claude can always actually finish — it just gets
-one nudge per turn.
+…or add the entry to `settings.json` by hand:
 
-Without a task source this hook adds latency for no benefit, which is why
-it's **off by default**.
+```jsonc
+"Stop": [
+  {
+    "hooks": [
+      {
+        "type": "command",
+        "command": "/Users/you/.claude/hooks/stop-continue-tasks.sh",
+        "timeout": 10,
+        "statusMessage": "Checking for remaining task work"
+      }
+    ]
+  }
+]
+```
+
+Without `MUXCLAUDE_TASKS_CMD` set the hook is a fast no-op, but it's still
+**off by default** — the only reason to install it is to drive the
+auto-continue behaviour.
 
 ## CI section + F5 / F6 popups
 
